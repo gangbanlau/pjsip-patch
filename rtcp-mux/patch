@@ -1,0 +1,417 @@
+Index: pjsip/src/pjsua-lib/pjsua_media.c
+===================================================================
+--- pjsip/src/pjsua-lib/pjsua_media.c	(revision 4992)
++++ pjsip/src/pjsua-lib/pjsua_media.c	(working copy)
+@@ -732,6 +732,7 @@
+ 				pjsua_call_media *call_med,
+                                 pj_bool_t async)
+ {
++    PJ_LOG(4,(THIS_FILE, "create_ice_media_transport"));
+     char stunip[PJ_INET6_ADDRSTRLEN];
+     pjsua_acc_config *acc_cfg;
+     pj_ice_strans_cfg ice_cfg;
+@@ -823,8 +824,19 @@
+ 
+     comp_cnt = 1;
+     if (PJMEDIA_ADVERTISE_RTCP && !acc_cfg->ice_cfg.ice_no_rtcp)
++    {
++        if (!call_med->rem_use_rtcp_mux)
+ 	++comp_cnt;
+-
++        else {
++            /* rfc5761 If the answerer wishes to multiplex RTP and RTCP on a single port, it
++             * MUST generate an answer containing an "a=rtcp-mux" attribute and a
++             * single "a=candidate:" line corresponding to the RTP port (i.e., there
++             * is no candidate for RTCP) for each media where it is desired to use
++             * RTP and RTCP multiplexing
++             */
++            PJ_LOG(4,(THIS_FILE, "Interactions with ICE, rfc5761"));
++        }
++    }
+     status = pjmedia_ice_create3(pjsua_var.med_endpt, name, comp_cnt,
+ 				 &ice_cfg, &ice_cb, 0, call_med,
+ 				 &call_med->tp);
+@@ -1343,6 +1355,7 @@
+                                   pj_bool_t async,
+                                   pjsua_med_tp_state_cb cb)
+ {
++    PJ_LOG(4,(THIS_FILE, "pjsua_call_media_init"));
+     pj_status_t status = PJ_SUCCESS;
+ 
+     /*
+@@ -1580,6 +1593,7 @@
+                                      pj_bool_t async,
+                                      pjsua_med_tp_state_cb cb)
+ {
++    PJ_LOG(4, (THIS_FILE, "pjsua_media_channel_init"));
+     const pj_str_t STR_AUDIO = { "audio", 5 };
+     const pj_str_t STR_VIDEO = { "video", 5 };
+     pjsua_call *call = &pjsua_var.calls[call_id];
+@@ -1590,7 +1604,7 @@
+     pj_uint8_t mvididx[PJSUA_MAX_CALL_MEDIA];
+     unsigned mvidcnt = PJ_ARRAY_SIZE(mvididx);
+     unsigned mtotvidcnt = PJ_ARRAY_SIZE(mvididx);
+-    unsigned mi;
++    unsigned mi, i;
+     pj_bool_t pending_med_tp = PJ_FALSE;
+     pj_bool_t reinit = PJ_FALSE;
+     pj_status_t status;
+@@ -1787,9 +1801,11 @@
+ 	pjsua_call_media *call_med = &call->media_prov[mi];
+ 	pj_bool_t enabled = PJ_FALSE;
+ 	pjmedia_type media_type = PJMEDIA_TYPE_UNKNOWN;
++    char * str_media_type = "audio";
+ 
+ 	if (pj_memchr(maudidx, mi, mtotaudcnt * sizeof(maudidx[0]))) {
+ 	    media_type = PJMEDIA_TYPE_AUDIO;
++        str_media_type = "audio";
+ 	    if (call->opt.aud_cnt &&
+ 		pj_memchr(maudidx, mi, maudcnt * sizeof(maudidx[0])))
+ 	    {
+@@ -1797,6 +1813,7 @@
+ 	    }
+ 	} else if (pj_memchr(mvididx, mi, mtotvidcnt * sizeof(mvididx[0]))) {
+ 	    media_type = PJMEDIA_TYPE_VIDEO;
++        str_media_type = "video";
+ 	    if (call->opt.vid_cnt &&
+ 		pj_memchr(mvididx, mi, mvidcnt * sizeof(mvididx[0])))
+ 	    {
+@@ -1805,6 +1822,25 @@
+ 	}
+ 
+ 	if (enabled) {
++        if (rem_sdp)
++        {
++            for (i=0; i<rem_sdp->media_count ; ++i) {
++                const pjmedia_sdp_media *m = rem_sdp->media[i];
++
++                /* Skip different media */
++                if (pj_stricmp2(&m->desc.media, str_media_type) != 0) {
++                    continue;
++                }
++
++                const pjmedia_sdp_attr *attr = pjmedia_sdp_attr_find2(m->attr_count, m->attr,
++                        "rtcp-mux", NULL);
++                if (attr) {
++                    call_med->rem_use_rtcp_mux = PJ_TRUE;
++                    PJ_LOG(4, (THIS_FILE, "rem_sdp has rtcp-mux"));
++                }
++            }
++        }
++
+ 	    status = pjsua_call_media_init(call_med, media_type,
+ 	                                   &acc->cfg.rtp_cfg,
+ 					   security_level, sip_err_code,
+@@ -1974,6 +2010,7 @@
+     if (status != PJ_SUCCESS)
+ 	return status;
+ 
++    PJ_LOG(4, (THIS_FILE, "med_prov_cnt %u", call->med_prov_cnt));
+     /* Process each media line */
+     for (mi=0; mi<call->med_prov_cnt; ++mi) {
+ 	pjsua_call_media *call_med = &call->media_prov[mi];
+Index: pjsip/include/pjsua-lib/pjsua_internal.h
+===================================================================
+--- pjsip/include/pjsua-lib/pjsua_internal.h	(revision 4992)
++++ pjsip/include/pjsua-lib/pjsua_internal.h	(working copy)
+@@ -90,6 +90,8 @@
+     pjsua_med_tp_state_cb      med_init_cb;/**< Media transport
+                                                 initialization callback.    */
+ 
++    pj_bool_t   rem_use_rtcp_mux;
++
+     /** Media transport creation callback. */
+     pj_status_t (*med_create_cb)(pjsua_call_media *call_med,
+                                  pj_status_t status, int security_level,
+Index: pjmedia/include/pjmedia/vid_stream.h
+===================================================================
+--- pjmedia/include/pjmedia/vid_stream.h	(revision 4992)
++++ pjmedia/include/pjmedia/vid_stream.h	(working copy)
+@@ -165,6 +165,9 @@
+ 
+     pjmedia_vid_stream_rc_config rc_cfg;
+                                     /**< Stream send rate control settings. */
++
++    pj_bool_t           use_rtcp_mux;
++
+ } pjmedia_vid_stream_info;
+ 
+ 
+Index: pjmedia/include/pjmedia/stream.h
+===================================================================
+--- pjmedia/include/pjmedia/stream.h	(revision 4992)
++++ pjmedia/include/pjmedia/stream.h	(working copy)
+@@ -138,6 +138,8 @@
+     pj_bool_t           rtcp_sdes_bye_disabled; 
+                                     /**< Disable automatic sending of RTCP
+                                          SDES and BYE.                      */
++
++    pj_bool_t           use_rtcp_mux;
+ } pjmedia_stream_info;
+ 
+ 
+Index: pjmedia/src/pjmedia/vid_stream.c
+===================================================================
+--- pjmedia/src/pjmedia/vid_stream.c	(revision 4992)
++++ pjmedia/src/pjmedia/vid_stream.c	(working copy)
+@@ -182,6 +182,8 @@
+     pj_timestamp	     tx_start;
+     pj_timestamp	     tx_end;
+ #endif
++
++    pj_bool_t           use_rtcp_mux;
+ };
+ 
+ /* Prototypes */
+@@ -455,6 +457,10 @@
+ 			       pkt_len);
+ 
+     /* Send to RTCP port */
++    if (stream->use_rtcp_mux)
++    pjmedia_transport_send_rtp(stream->transport, stream->enc->buf,
++			        pkt_len);
++    else
+     pjmedia_transport_send_rtcp(stream->transport, stream->enc->buf,
+ 			        pkt_len);
+ 
+@@ -522,6 +528,9 @@
+     }
+ 
+     /* Send! */
++    if (stream->use_rtcp_mux)
++    status = pjmedia_transport_send_rtp(stream->transport, pkt, len);
++    else
+     status = pjmedia_transport_send_rtcp(stream->transport, pkt, len);
+ 
+     return status;
+@@ -585,6 +594,9 @@
+ }
+ #endif
+ 
++static void on_rx_rtcp( void *data,
++                        void *pkt, 
++                        pj_ssize_t bytes_read);
+ 
+ /*
+  * This callback is called by stream transport on receipt of packets
+@@ -611,6 +623,17 @@
+ 	return;
+     }
+ 
++    if (stream->use_rtcp_mux)
++    {
++        pjmedia_rtcp_common *common = (pjmedia_rtcp_common*) pkt;
++        //PJ_LOG(4, (THIS_FILE, "pt %u", common->pt));
++        if (
++                common->pt != channel->rtp.out_pt
++                && (common->pt != (channel->rtp.out_pt + 128))
++           )
++            return on_rx_rtcp(data, pkt, bytes_read);
++    }
++
+     /* Ignore keep-alive packets */
+     if (bytes_read < (pj_ssize_t) sizeof(pjmedia_rtp_hdr))
+ 	return;
+@@ -1446,6 +1469,10 @@
+     stream->use_ka = info->use_ka;
+ #endif
+ 
++    stream->use_rtcp_mux = info->use_rtcp_mux;
++    if (stream->use_rtcp_mux)
++        PJ_LOG(4, (THIS_FILE, "rtcp-mux enabled"));
++
+     /* Build random RTCP CNAME. CNAME has user@host format */
+     stream->cname.ptr = p = (char*) pj_pool_alloc(pool, 20);
+     pj_create_random_string(p, 5);
+Index: pjmedia/src/pjmedia/vid_stream_info.c
+===================================================================
+--- pjmedia/src/pjmedia/vid_stream_info.c	(revision 4992)
++++ pjmedia/src/pjmedia/vid_stream_info.c	(working copy)
+@@ -21,9 +21,12 @@
+ #include <pjmedia/stream_common.h>
+ #include <pj/ctype.h>
+ #include <pj/rand.h>
++#include <pj/log.h>
+ 
+ #if defined(PJMEDIA_HAS_VIDEO) && (PJMEDIA_HAS_VIDEO != 0)
+ 
++#define THIS_FILE "vid_stream_info.c"
++
+ static const pj_str_t ID_VIDEO = { "video", 5};
+ static const pj_str_t ID_IN = { "IN", 2 };
+ static const pj_str_t ID_IP4 = { "IP4", 3};
+@@ -369,6 +372,20 @@
+ 	pj_sockaddr_set_port(&si->rem_rtcp, (pj_uint16_t)rtcp_port);
+     }
+ 
++    /* rtcp-mux */
++    si->use_rtcp_mux = PJ_FALSE;
++    attr = pjmedia_sdp_attr_find2(rem_m->attr_count, rem_m->attr,
++            "rtcp-mux", NULL);
++    if (attr) {
++        attr = pjmedia_sdp_attr_find2(local_m->attr_count, local_m->attr,
++                "rtcp-mux", NULL);
++        if (attr)
++            si->use_rtcp_mux = PJ_TRUE;
++    }
++
++    if (si->use_rtcp_mux)
++        PJ_LOG(4, (THIS_FILE, "rtcp-mux neg ok"));
++
+     /* Get codec info and param */
+     status = get_video_codec_info_param(si, pool, NULL, local_m, rem_m);
+ 
+Index: pjmedia/src/pjmedia/stream_info.c
+===================================================================
+--- pjmedia/src/pjmedia/stream_info.c	(revision 4992)
++++ pjmedia/src/pjmedia/stream_info.c	(working copy)
+@@ -22,7 +22,10 @@
+ #include <pjmedia/stream_common.h>
+ #include <pj/ctype.h>
+ #include <pj/rand.h>
++#include <pj/log.h>
+ 
++#define THIS_FILE "stream_info.c"
++
+ static const pj_str_t ID_AUDIO = { "audio", 5};
+ static const pj_str_t ID_IN = { "IN", 2 };
+ static const pj_str_t ID_IP4 = { "IP4", 3};
+@@ -497,7 +500,20 @@
+ 	pj_sockaddr_set_port(&si->rem_rtcp, (pj_uint16_t)rtcp_port);
+     }
+ 
++    /* rtcp-mux */
++    si->use_rtcp_mux = PJ_FALSE;
++    attr = pjmedia_sdp_attr_find2(rem_m->attr_count, rem_m->attr,
++				  "rtcp-mux", NULL);
++    if (attr) {
++        attr = pjmedia_sdp_attr_find2(local_m->attr_count, local_m->attr,
++				  "rtcp-mux", NULL);
++        if (attr)
++            si->use_rtcp_mux = PJ_TRUE;
++    } 
+ 
++    if (si->use_rtcp_mux)
++        PJ_LOG(4, (THIS_FILE, "rtcp-mux neg ok"));
++
+     /* Get the payload number for receive channel. */
+     /*
+        Previously we used to rely on fmt[0] being the selected codec,
+Index: pjmedia/src/pjmedia/stream.c
+===================================================================
+--- pjmedia/src/pjmedia/stream.c	(revision 4992)
++++ pjmedia/src/pjmedia/stream.c	(working copy)
+@@ -226,6 +226,8 @@
+ #endif
+ 
+     pj_uint32_t		     rtp_rx_last_ts;        /**< Last received RTP timestamp*/
++
++    pj_bool_t           use_rtcp_mux;
+ };
+ 
+ 
+@@ -456,6 +458,10 @@
+ 			       pkt_len);
+ 
+     /* Send to RTCP port */
++    if (stream->use_rtcp_mux)
++    pjmedia_transport_send_rtp(stream->transport, stream->enc->out_pkt,
++			        pkt_len);
++    else
+     pjmedia_transport_send_rtcp(stream->transport, stream->enc->out_pkt,
+ 			        pkt_len);
+ 
+@@ -1006,6 +1012,8 @@
+ 
+ 	    /* Send the RTCP XR to third-party destination if specified */
+ 	    if (stream->rtcp_xr_dest_len) {
++            // TODO rtcp-mux
++            PJ_LOG(4, (THIS_FILE, "TODO rtcp-mux"));
+ 		pjmedia_transport_send_rtcp2(stream->transport,
+ 					     &stream->rtcp_xr_dest,
+ 					     stream->rtcp_xr_dest_len,
+@@ -1035,6 +1043,9 @@
+     }
+ 
+     /* Send! */
++    if (stream->use_rtcp_mux)
++    status = pjmedia_transport_send_rtp(stream->transport, pkt, len);
++    else
+     status = pjmedia_transport_send_rtcp(stream->transport, pkt, len);
+ 
+     return status;
+@@ -1610,6 +1621,9 @@
+     }
+ }
+ 
++static void on_rx_rtcp( void *data,
++		       void *pkt,
++                       pj_ssize_t bytes_read);
+ 
+ /*
+  * This callback is called by stream transport on receipt of packets
+@@ -1636,6 +1650,17 @@
+ 	return;
+     }
+ 
++    if (stream->use_rtcp_mux)
++    {
++        pjmedia_rtcp_common *common = (pjmedia_rtcp_common*) pkt;
++        //PJ_LOG(4, (THIS_FILE, "pt %u", common->pt));
++        if (common->pt != stream->rx_event_pt 
++                && common->pt != channel->rtp.out_pt
++                && (common->pt != (channel->rtp.out_pt + 128))
++                )
++            return on_rx_rtcp(data, pkt, bytes_read);
++    }
++
+     /* Ignore keep-alive packets */
+     if (bytes_read < (pj_ssize_t) sizeof(pjmedia_rtp_hdr))
+ 	return;
+@@ -2048,6 +2073,10 @@
+     stream->use_ka = info->use_ka;
+ #endif
+ 
++    stream->use_rtcp_mux = info->use_rtcp_mux;
++    if (stream->use_rtcp_mux)
++        PJ_LOG(4, (THIS_FILE, "rtcp-mux enabled"));
++
+     /* Build random RTCP CNAME. CNAME has user@host format */
+     stream->cname.ptr = p = (char*) pj_pool_alloc(pool, 20);
+     pj_create_random_string(p, 5);
+Index: pjmedia/src/pjmedia/endpoint.c
+===================================================================
+--- pjmedia/src/pjmedia/endpoint.c	(revision 4992)
++++ pjmedia/src/pjmedia/endpoint.c	(working copy)
+@@ -561,6 +561,11 @@
+     }
+ #endif
+ 
++    /* rfc5761 a=rtcp-mux */
++    attr = PJ_POOL_ZALLOC_T(pool, pjmedia_sdp_attr);
++    attr->name = pj_str("rtcp-mux");
++    m->attr[m->attr_count++] = attr;
++
+     /* Put bandwidth info in media level using bandwidth modifier "TIAS"
+      * (RFC3890).
+      */
+@@ -718,6 +723,11 @@
+ 	    m->attr[m->attr_count++] = attr;
+ 	}
+     
++    /* rfc5761 a=rtcp-mux */
++    attr = PJ_POOL_ZALLOC_T(pool, pjmedia_sdp_attr);
++    attr->name = pj_str("rtcp-mux");
++    m->attr[m->attr_count++] = attr;
++
+ 	/* Find maximum bitrate in this media */
+ 	vfd = pjmedia_format_get_video_format_detail(&codec_param.enc_fmt,
+ 						     PJ_TRUE);
+@@ -837,6 +847,7 @@
+ 	unsigned i;
+ 
+ 	/* The remaining stream, if any, are videos (by convention as well) */
++        PJ_LOG(4,(THIS_FILE, "stream_cnt: %u", stream_cnt));
+ 	for (i=1; i<stream_cnt; ++i) {
+ 	    status = pjmedia_endpt_create_video_sdp(endpt, pool,
+ 						    &sock_info[i], 0, &m);
